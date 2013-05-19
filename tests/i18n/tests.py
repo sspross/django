@@ -30,7 +30,8 @@ from django.utils.translation import (activate, deactivate,
     ngettext, ngettext_lazy,
     ungettext, ungettext_lazy,
     pgettext, pgettext_lazy,
-    npgettext, npgettext_lazy)
+    npgettext, npgettext_lazy,
+    check_for_language)
 
 from .commands.tests import can_run_extraction_tests, can_run_compilation_tests
 if can_run_extraction_tests:
@@ -331,6 +332,36 @@ class TranslationTests(TestCase):
             t = Template('{% load i18n %}{% blocktrans %}My other name is {{ person }}.{% endblocktrans %}')
             rendered = t.render(Context({'person': 'James'}))
             self.assertEqual(rendered, 'My other name is James.')
+
+
+class TranslationThreadSafetyTests(TestCase):
+    def setUp(self):
+        self._old_language = get_language()
+        self._translations = trans_real._translations
+
+        # here we rely on .split() being called inside the _fetch()
+        # in trans_real.translation()
+        class sideeffect_str(str):
+            def split(self, *args, **kwargs):
+                res = str.split(self, *args, **kwargs)
+                trans_real._translations['en-YY'] = None
+                return res
+
+        trans_real._translations = {sideeffect_str('en-XX'): None}
+
+    def tearDown(self):
+        trans_real._translations = self._translations
+        activate(self._old_language)
+
+    def test_bug14894_translation_activate_thread_safety(self):
+        translation_count = len(trans_real._translations)
+        try:
+            translation.activate('pl')
+        except RuntimeError:
+            self.fail('translation.activate() is not thread-safe')
+
+        # make sure sideeffect_str actually added a new translation
+        self.assertLess(translation_count, len(trans_real._translations))
 
 
 @override_settings(USE_L10N=True)
@@ -1114,3 +1145,40 @@ class LocaleMiddlewareTests(TestCase):
         self.assertContains(response, "Oui/Non")
         response = self.client.get('/en/streaming/')
         self.assertContains(response, "Yes/No")
+
+@override_settings(
+    USE_I18N=True,
+    LANGUAGES=(
+        ('bg', 'Bulgarian'),
+        ('en-us', 'English'),
+    ),
+    MIDDLEWARE_CLASSES=(
+        'django.middleware.locale.LocaleMiddleware',
+        'django.middleware.common.CommonMiddleware',
+    ),
+)
+class CountrySpecificLanguageTests(TestCase):
+
+    urls = 'i18n.urls'
+
+    def setUp(self):
+        trans_real._accepted = {}
+        self.rf = RequestFactory()
+
+    def test_check_for_language(self):
+        self.assertTrue(check_for_language('en'))
+        self.assertTrue(check_for_language('en-us'))
+        self.assertTrue(check_for_language('en-US'))
+
+
+    def test_get_language_from_request(self):
+        r = self.rf.get('/')
+        r.COOKIES = {}
+        r.META = {'HTTP_ACCEPT_LANGUAGE': 'en-US,en;q=0.8,bg;q=0.6,ru;q=0.4'}
+        lang = get_language_from_request(r)
+        self.assertEqual('en-us', lang)
+        r = self.rf.get('/')
+        r.COOKIES = {}
+        r.META = {'HTTP_ACCEPT_LANGUAGE': 'bg-bg,en-US;q=0.8,en;q=0.6,ru;q=0.4'}
+        lang = get_language_from_request(r)
+        self.assertEqual('bg', lang)

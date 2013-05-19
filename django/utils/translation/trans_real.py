@@ -140,7 +140,7 @@ def translation(language):
         # doesn't affect en-gb), even though they will both use the core "en"
         # translation. So we have to subvert Python's internal gettext caching.
         base_lang = lambda x: x.split('-', 1)[0]
-        if base_lang(lang) in [base_lang(trans) for trans in _translations]:
+        if base_lang(lang) in [base_lang(trans) for trans in list(_translations)]:
             res._info = res._info.copy()
             res._catalog = res._catalog.copy()
 
@@ -364,10 +364,14 @@ def get_supported_language_variant(lang_code, supported=None):
     if supported is None:
         from django.conf import settings
         supported = dict(settings.LANGUAGES)
-    if lang_code and lang_code not in supported:
-        lang_code = lang_code.split('-')[0] # e.g. if fr-ca is not supported fallback to fr
-    if lang_code and lang_code in supported and check_for_language(lang_code):
-        return lang_code
+    if lang_code:
+        # e.g. if fr-CA is not supported, try fr-ca;
+        #      if that fails, fallback to fr.
+        variants = (lang_code, lang_code.lower(), lang_code.split('-')[0],
+                    lang_code.lower().split('-')[0])
+        for code in variants:
+            if code in supported and check_for_language(code):
+                return code
     raise LookupError(lang_code)
 
 def get_language_from_path(path, supported=None):
@@ -438,14 +442,13 @@ def get_language_from_request(request, check_path=False):
             # need to check again.
             return _accepted[normalized]
 
-        for lang, dirname in ((accept_lang, normalized),
-                (accept_lang.split('-')[0], normalized.split('_')[0])):
-            if lang.lower() not in supported:
-                continue
-            for path in all_locale_paths():
-                if os.path.exists(os.path.join(path, dirname, 'LC_MESSAGES', 'django.mo')):
-                    _accepted[normalized] = lang
-                    return lang
+        try:
+            accept_lang = get_supported_language_variant(accept_lang, supported)
+        except LookupError:
+            continue
+        else:
+            _accepted[normalized] = accept_lang
+            return accept_lang
 
     try:
         return get_supported_language_variant(settings.LANGUAGE_CODE, supported)
